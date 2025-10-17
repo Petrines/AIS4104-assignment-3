@@ -40,7 +40,8 @@ bool is_average_below_eps(const std::vector<double> &values, double eps = 10e-7,
         sum += values[i];
     }
     double average = sum / double(n_values);
-    return eps <= average;
+    if (eps <= average) return true;
+    return false;
 }
 
 
@@ -54,9 +55,10 @@ int main()
     std::cout << "Test 1.a:" << eigen.transpose() << std::endl;
     //T.1b) TEST CODE
     std::vector<double> values = {1.0, 2.0, 3.0, 4.0, 5.0};
-    bool test = is_average_below_eps(values, 4.34,2);
-    std::cout << "Test 1.b:" << test << std::endl;
-
+    bool test1b = is_average_below_eps(values, 4.34,2);
+    std::cout << "true Test 1.b:" << std::boolalpha << test1b << std::noboolalpha << std::endl;
+    test1b = is_average_below_eps(values, 4.34,3);
+    std::cout << "false Test 1.b:" << std::boolalpha << test1b << std::noboolalpha << std::endl;
 
 
     std::cout << "Hello, World!" << std::endl;
