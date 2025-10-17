@@ -17,6 +17,8 @@ double rad_to_deg(double radians)
     return radians * 57.2957795;
 }
 
+// changes
+
 //T.1 a) Create a function that converts between vector types.
 //MADE BY ME <3 used chat to describe datatypes. Watched youtube vidoes on for loops.
 Eigen::VectorXd std_vector_to_eigen(const std::vector<double> &v) {
