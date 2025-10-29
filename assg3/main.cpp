@@ -175,6 +175,80 @@ Eigen::MatrixXd adjoint_matrix(const Eigen::Matrix4d &tf) {
 
     return AdT;
 }
+// T.1 b) Twist fra ω og v**
+//(3.70) side 96 *
+// Formel lyder slik: V_b = [ω_b; v_b] ∈ R^6
+Eigen::VectorXd twist(const Eigen::Vector3d &w, const Eigen::Vector3d &v) {
+    Eigen::VectorXd V(6);
+    V << w, v;
+    return V;
+}
+// T.1 e) Cot(x)
+double cot(double x) {
+    return 1 / (std::sin(x) / std::cos(x)); // fordi tan = sin/cos
+}
+// ---- T3.b: Implement the matrix logarithm for rotation matrices ----
+// MR 2019 - Formler 3.50 - 3.61 side 85-86
+/*Implement the algorithm for calculating the matrix logarithm of a rotation matrix, R ∈ SO(3), to obtain the
+exponential coordinates [ω]θ ∈ so(3).*/
+std::pair<Eigen::Vector3d, double> matrix_logarithm(const Eigen::Matrix3d &r)
+{
+    double theta;
+    Eigen::Vector3d w;
+
+    if (r == Eigen::Matrix3d::Identity()) {
+        theta = 0;
+    }
+    else {
+        double trace_r = r.trace(); // Built-in eigen function for trace
+        if (trace_r == -1) {
+            theta = PI;
+            w = (1 / sqrt(2 * (1 + r(2,2)))) * Eigen::Vector3d (r(0,2), r(1,2), 1 + r(2,2));
+        }
+        else {
+            theta = acos(0.5 * (trace_r - 1));
+            double w_n = 1 / 2*sin(theta);
+
+            double w_1 = w_n * (r(2, 1) - r(1, 2));
+            double w_2 = w_n * (r(0, 2) - r(2, 0));
+            double w_3 = w_n * (r(1, 0) - r(0, 1));
+
+            w = Eigen::Vector3d(w_1, w_2, w_3);
+        }
+    }
+
+    return std::pair<Eigen::Vector3d, double>(w, theta);
+
+
+
+}
+// ---- T3.d: Implement the matrix logarithm for homogeneous transformation matrices ----
+// MR 2019 - Følger algoritmen på side 104
+/*Implement the algorithm for calculating the matrix logarithm of a transformation matrix, T ∈ SE(3), to obtain
+ the exponential coordinates, [S]θ ∈ se(3).*/
+std::pair<Eigen::VectorXd, double> matrix_logarithm(const Eigen::Matrix4d &t) {
+    const Eigen::Matrix3d R = t.topLeftCorner<3,3>();
+    const Eigen::Vector3d p = t.topRightCorner<3,1>();
+
+    Eigen::Vector3d w;
+    Eigen::Vector3d v;
+    double theta;
+
+    if (R == Eigen::Matrix3d::Identity()) {
+        w = Eigen::Vector3d::Zero();
+        v = p / p.norm();
+        theta = p.norm();
+    }
+    else {
+        std::pair<Eigen::Vector3d, double> m_log = matrix_logarithm(R);
+        w = m_log.first;
+        theta = m_log.second;
+        const Eigen::Matrix3d skew_w = skew_symmetric(w);
+        v = (((1/theta) * Eigen::Matrix3d::Identity()) - 0.5 * skew_w + ((1/theta) - 0.5* cot(theta/2)) * skew_w*skew_w) * p;
+    }
+
+    return std::pair<Eigen::VectorXd, double>(twist(w,v), theta);
+}
 ////////////////////////////////////////////////UNDER HER STATRA ASSIGMENT3
 
 //T.1 a) Create a function that converts between vector types.
@@ -534,12 +608,180 @@ void test_optimizations()
     test_gradient_descent_minimize(f1,-20.0);
 }
 //T.3 a) Construct the space Jacobian.
-//Partially written with help from a youtube video and ChatGPT 5.0
-Eigen::MatrixXd ur3e_space_jacobian(const Eigen::VectorXd &current_joint_positions) {
+//Partially written with help from Gemini AI
+//Equation (5.11) page 153, MR physical book reprint 2019 (version 10, june 2024)
+Eigen::MatrixXd ur3e_space_jacobian(const Eigen::VectorXd &current_joint_positions)
+{
+    auto [_, S] = ur3e_space_chain();
+    const int dof = static_cast<int>(S.size());
 
+    Eigen::MatrixXd J = Eigen::MatrixXd::Zero(6, dof);
+    Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+
+    for (int i = 0; i < dof; ++i) {
+
+        J.col(i) = adjoint_matrix(T) * S[i];
+
+        const double theta = current_joint_positions[i];
+        const Eigen::Vector3d w = S[i].head<3>();
+        const Eigen::Vector3d v = S[i].tail<3>();
+
+        T = T * matrix_exponential(w, v, theta);
+    }
+    return J;
+}
+//T.3 b) Construct the body Jacobian.
+//Partially written with help from Gemini AI
+//Equation (5.18) page 157, MR physical book reprint 2019 (version 10, june 2024)
+Eigen::MatrixXd ur3e_body_jacobian(const Eigen::VectorXd &current_joint_positions) {
+
+    auto [_, B] = ur3e_body_chain();
+
+    const int dof = static_cast<int>(B.size());
+
+    Eigen::MatrixXd Jb = Eigen::MatrixXd::Zero(6, dof);
+
+    Eigen::Matrix4d T_akk = Eigen::Matrix4d::Identity();
+
+    for (int i = dof - 1; i >= 0; --i)
+    {
+        const Eigen::VectorXd& Bi = B[i];
+        const double theta_i = current_joint_positions(i);
+
+        Eigen::MatrixXd Ad_T_akk = adjoint_matrix(T_akk); // 6x6
+        Eigen::VectorXd Bi_theta = Ad_T_akk * Bi;         // 6x1
+
+        Jb.col(i) = Bi_theta;
+
+        const Eigen::Vector3d w = Bi.head<3>();
+        const Eigen::Vector3d v = Bi.tail<3>();
+
+        Eigen::Matrix4d Exp_Neg_B_theta = matrix_exponential(w, v, -theta_i);
+
+        T_akk = T_akk * Exp_Neg_B_theta;
+    }
+
+    return Jb;
+}
+// T.3 c) Test the Jacobian functions.
+//From assignment
+//NOTAT TIL ALEKSANDER SKREDE:
+// Merk: Dei tre siste matriseneparra blir ikkje heilt like.
+// Eg veit at Jb ≈ Ad_Tbs * Js og Js ≈ Ad_Tsb * Jb, men trur forskjellen kjem av små numeriske feil.
+// Det kan også vere uendelig med løsninga i en robot. Som dei sei, det finnes mange veia til roma.
+// Eg fekk vertfall ikkje heilt fiksa det innan innlevering.
+void ur3e_test_jacobian(const Eigen::VectorXd &joint_positions)
+{
+    Eigen::Matrix4d tsb = ur3e_body_fk(joint_positions);
+    auto [m, space_screws] = ur3e_space_chain();
+    Eigen::MatrixXd jb = ur3e_body_jacobian(joint_positions);
+    Eigen::MatrixXd js = ur3e_space_jacobian(joint_positions);
+    Eigen::MatrixXd ad_tsb = adjoint_matrix(tsb);
+    Eigen::MatrixXd ad_tbs = adjoint_matrix(tsb.inverse());
+    std::cout << "Jb: " << std::endl << jb << std::endl << "Ad_tbs*Js:" << std::endl << ad_tbs * js <<
+    std::endl << std::endl;
+    std::cout << "Js: " << std::endl << js << std::endl << "Ad_tsb*Jb:" << std::endl << ad_tsb * jb <<
+    std::endl << std::endl;
+    std::cout << "d Jb: " << std::endl << jb- ad_tbs * js << std::endl << std::endl;
+    std::cout << "d Js: " << std::endl << js- ad_tsb * jb << std::endl << std::endl;
+}
+void ur3e_test_jacobian()
+{
+    std::cout << "Jacobian matrix tests" << std::endl;
+    ur3e_test_jacobian(std_vector_to_eigen(std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}) *
+    DEG_TO_RAD);
+    ur3e_test_jacobian(std_vector_to_eigen(std::vector<double>{45.0,-20.0, 10.0, 2.5, 30.0,-50.0}) *
+    DEG_TO_RAD);
+}
+// T.4 a) Implement a numerical inverse kinematics solver.
+//Partially written with help from Gemini AI
+//Equation (x) page x, MR physical book reprint 2019 (version 10, june 2024)
+std::pair<size_t, Eigen::VectorXd> ur3e_ik_body(const Eigen::Matrix4d &t_sd, const Eigen::VectorXd
+    &current_joint_positions, double gamma = 1e-2, double v_e = 4e-3, double w_e = 4e-3)
+{
+    constexpr size_t max_iter = 10000;
+    size_t iter = 0;
+
+    // Initial Guess from current joint positions
+    Eigen::VectorXd thetas = current_joint_positions;
+
+    for (; iter < max_iter; ++iter) {
+        // Compute current end-effector position
+        Eigen::Matrix4d T_sb = ur3e_body_fk(thetas);
+
+        // Find pose error twist
+        auto T_err = (T_sb.inverse() * t_sd).eval();
+        auto [Vb, _] = matrix_logarithm(T_err);
+
+        Eigen::Vector3d wb = Vb.head<3>();
+        Eigen::Vector3d vb = Vb.tail<3>();
+
+        // Stop if both rotational and positional errors small enough
+        if (wb.norm() < w_e && vb.norm() < v_e)
+            break;
+
+        // Compute Jacobian in body frame
+        Eigen::MatrixXd Jb = ur3e_body_jacobian(thetas);
+
+        double lambda = 1e-4; // damping term
+        Eigen::MatrixXd I6 = Eigen::MatrixXd::Identity(6,6);
+        Eigen::MatrixXd Jb_pinv =
+            Jb.transpose() * (Jb * Jb.transpose() + lambda * lambda * I6).inverse();
+
+        // Update step
+        thetas = thetas + gamma * (Jb_pinv * Vb);
+        // Keep angles between -pi and pi
+        for(int k = 0; k < thetas.size(); k++) thetas[k] = std::atan2(std::sin(thetas[k]), std::cos(thetas[k]));
+    }
+
+    return {iter, thetas};
 }
 
 
+//T.4 b) Test the inverse kinematics solver.
+//From the assignment
+void ur3e_ik_test_pose(const Eigen::Vector3d &pos, const Eigen::Vector3d &zyx, const Eigen::VectorXd &j0)
+
+{
+    std::cout << "Test from pose" << std::endl;
+    Eigen::Matrix4d t_sd = transformation_matrix(rotation_matrix_from_euler_zyx(zyx), pos);
+    auto [iterations, j_ik] = ur3e_ik_body(t_sd, j0);
+    Eigen::Matrix4d t_ik = ur3e_body_fk(j_ik);
+    print_pose(t_ik);
+    print_pose(t_sd);
+    std::cout << "Converged after " << iterations << " iterations" << std::endl;
+    std::cout << "J_0: " << j0.transpose() * RAD_TO_DEG << std::endl;
+    std::cout << "J_ik: " << j_ik.transpose() * RAD_TO_DEG << std::endl << std::endl;
+}
+void ur3e_ik_test_configuration(const Eigen::VectorXd &joint_positions, const Eigen::VectorXd &j0)
+{
+    std::cout << "Test from configuration" << std::endl;
+    Eigen::Matrix4d t_sd = ur3e_space_fk(joint_positions);
+    auto [iterations, j_ik] = ur3e_ik_body(t_sd, j0);
+    Eigen::Matrix4d t_ik = ur3e_body_fk(j_ik);
+    print_pose(t_ik);
+    print_pose(t_sd);
+    std::cout << "Converged after " << iterations << " iterations" << std::endl;
+    std::cout << "J_0: " << j0.transpose() * RAD_TO_DEG << std::endl;
+    std::cout << "J_d: " << joint_positions.transpose() * RAD_TO_DEG << std::endl;
+    std::cout << "J_ik: " << j_ik.transpose() * RAD_TO_DEG << std::endl << std::endl;
+}
+void ur3e_ik_test()
+ {
+ Eigen::VectorXd j_t0 = std_vector_to_eigen(std::vector<double>{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}) *
+ DEG_TO_RAD;
+ Eigen::VectorXd j_t1 = std_vector_to_eigen(std::vector<double>{0.0, 0.0,-89.0, 0.0, 0.0, 0.0}) *
+ DEG_TO_RAD;
+ ur3e_ik_test_pose(Eigen::Vector3d{0.3289, 0.22315, 0.36505}, Eigen::Vector3d{0.0, 90.0,-90.0} *
+ DEG_TO_RAD, j_t0);
+ ur3e_ik_test_pose(Eigen::Vector3d{0.3289, 0.22315, 0.36505}, Eigen::Vector3d{0.0, 90.0,-90.0} *
+ DEG_TO_RAD, j_t1);
+ Eigen::VectorXd j_t2 = std_vector_to_eigen(std::vector<double>{50.0,-30.0, 20, 0.0,-30.0, 50.0})
+ * DEG_TO_RAD;
+ Eigen::VectorXd j_d1 = std_vector_to_eigen(std::vector<double>{45.0,-20.0, 10.0, 2.5, 30.0,-50.0}) * DEG_TO_RAD;
+ ur3e_ik_test_configuration(j_d1, j_t0);
+ ur3e_ik_test_configuration(j_d1, j_t2);
+ }
 
 int main()
 {
@@ -584,6 +826,18 @@ int main()
 
     test_optimizations();
 
+    std::cout << std::endl << "========== Test done ==========" << std::endl;
+    //Task 3 Testcode
+    std::cout << "===============================" << std::endl;
+    std::cout << "  Testing Jacobien" << std::endl;
+    std::cout << "===============================" << std::endl << std::endl;
+    ur3e_test_jacobian();
+    std::cout << std::endl << "========== Test done ==========" << std::endl;
+    //T4 Testcode
+    std::cout << "===============================" << std::endl;
+    std::cout << "  Testing ik test" << std::endl;
+    std::cout << "===============================" << std::endl << std::endl;
+    ur3e_ik_test();
     std::cout << std::endl << "========== Test done ==========" << std::endl;
 
 
